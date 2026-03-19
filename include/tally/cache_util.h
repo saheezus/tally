@@ -38,7 +38,7 @@ static void cache_cubin_data(const char* cubin_data, size_t cubin_size, int elf_
     }
 
     // If already exists, return early
-    auto &cubin_cache = TallyCache::cache->get_cubin_cache();
+    auto &cubin_cache = TallyCache::get_or_init_cache()->get_cubin_cache();
     if (cubin_cache.contains(cubin_data, cubin_size)) {
         
         // Delete cubin file

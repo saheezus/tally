@@ -78,6 +78,12 @@ class TallyCache
 {
 public:
     static std::shared_ptr<TallyCache> cache;
+    static std::shared_ptr<TallyCache> get_or_init_cache() {
+        if (!cache) {
+            cache = std::make_shared<TallyCache>();
+        }
+        return cache;
+    }
 
     TallyCache();
 

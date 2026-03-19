@@ -4,7 +4,8 @@
 #include <tally/util.h>
 #include <tally/consts.h>
 
-std::shared_ptr<TallyCache> TallyCache::cache = std::make_shared<TallyCache>();
+// std::shared_ptr<TallyCache> TallyCache::cache = std::make_shared<TallyCache>();
+std::shared_ptr<TallyCache> TallyCache::cache = nullptr;
 
 CubinCache::CubinCache()
 {
@@ -23,8 +24,9 @@ CubinCache::CubinCache()
 
 void CubinCache::load_cubin_cache(size_t cubin_size) {
 
+    std::unique_lock lock(mutex_);
     auto has_cubin_size = cubin_map.find(cubin_size) != cubin_map.end();
-
+    
     // if not exists, look up file system
     if (!has_cubin_size) {
         auto cache_file_name = std::to_string(cubin_size) + ".cache";
@@ -38,6 +40,7 @@ void CubinCache::load_cubin_cache(size_t cubin_size) {
 }
 
 void CubinCache::save_cubin_cache(size_t cubin_size) {
+    std::shared_lock lock(mutex_);
     auto cache_file_name = std::to_string(cubin_size) + ".cache";
     auto cache_path = transform_cache_dir + "/" + cache_file_name;
 
@@ -77,16 +80,36 @@ void CubinCache::add_data(
 
 CubinData* CubinCache::find_transform_data(const char* cubin_data, size_t cubin_size)
 {
-    std::shared_lock lock(mutex_);
+    {
+    	std::shared_lock lock(mutex_);
+	auto it = cubin_map.find(cubin_size);
 
-    auto has_cubin_size = cubin_map.find(cubin_size) != cubin_map.end();
-
-    // if not exists, look up file system
-    if (!has_cubin_size) {
-        load_cubin_cache(cubin_size);
+	if (it != cubin_map.end()) {
+	    for (auto &data : it -> second) {
+		if (memcmp(data.cubin_data.c_str(), cubin_data, cubin_size) == 0) {
+		    return &data;
+		}
+	    }
+	    return nullptr;
+	}
     }
 
-    for (auto &data : cubin_map[cubin_size]) {
+    load_cubin_cache(cubin_size);
+
+    std::shared_lock lock(mutex_);
+    auto it = cubin_map.find(cubin_size);
+    if (it == cubin_map.end()) {
+	return nullptr;
+    }
+
+    // auto has_cubin_size = cubin_map.find(cubin_size) != cubin_map.end();
+
+    // if not exists, look up file system
+    /*if (!has_cubin_size) {
+        load_cubin_cache(cubin_size);
+    }
+*/    
+    for (auto &data : it->second) {
         if (memcmp(data.cubin_data.c_str(), cubin_data, cubin_size) == 0) {
             return &data;
         }

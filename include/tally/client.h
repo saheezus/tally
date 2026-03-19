@@ -47,6 +47,14 @@ public:
 
     ~TallyClient(){}
 
+    static TallyClient* get_or_init_client() 
+    {
+        if (!TallyClient::client) {
+            TallyClient::client = new TallyClient();
+        }
+        return TallyClient::client;
+    }
+
     void connect_to_server()
     {
         if (!has_connected) {

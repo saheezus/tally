@@ -228,21 +228,22 @@ void *dlsym(void * handle, const char * symbol)
 
     if (!res) {
         
-        if (handle == tally_handle) {
+        if (tally_handle && handle == tally_handle) {
             TALLY_SPD_WARN("dlsym failed to find symbol in tally lib: " + symbol_str);
 
             // Try looking up symbol in the original cuda lib
             for (auto &lib_name : preload_libs) {
-                auto lib_handle = lib_name_to_lib_handle[lib_name];
+                auto it = lib_name_to_lib_handle.find(lib_name);
+		if (it == lib_name_to_lib_handle.end() || !it->second) continue;
 
-                res = ldlsym(lib_handle, symbol_ptr); 
+                res = ldlsym(it->second, symbol_ptr); 
             
                 if (res) {
                     TALLY_SPD_WARN("dlsym falls back to retrieve symbol from " + lib_name);
                     return res;
                 }
             }
-        } else {
+        } else if (tally_handle) {
             // Try looking up symbol in tally lib
             res = ldlsym(tally_handle, symbol_ptr);
             if (res) {
@@ -297,7 +298,8 @@ void** __cudaRegisterFatBinary( void *fatCubin ) {
     const char *cubin_data = (const char *) wp->data;
     size_t cubin_size = fbh->headerSize + fbh->fatSize;
 
-    auto &cubin_cache = TallyCache::cache->get_cubin_cache();
+    // auto &cubin_cache = TallyCache::cache->get_cubin_cache();
+    auto &cubin_cache = TallyCache::get_or_init_cache()->get_cubin_cache();
     bool cached = cubin_cache.contains(cubin_data, cubin_size);
     uint32_t cubin_uid = 0;
 
@@ -356,6 +358,13 @@ void** __cudaRegisterFatBinary( void *fatCubin ) {
         TallyClient::client->_kernel_name_to_args[kernel_name] = param_sizes;
     }
 
+    if (!l__cudaRegisterFatBinary) {
+    	l__cudaRegisterFatBinary =
+            (void** (*)(void*)) dlsym(RTLD_NEXT, "__cudaRegisterFatBinary");
+    	if (!l__cudaRegisterFatBinary) {
+      	    throw std::runtime_error("Failed to resolve __cudaRegisterFatBinary");
+    	}
+    }
     return l__cudaRegisterFatBinary(fatCubin);
 
 #endif
@@ -401,6 +410,15 @@ void __cudaRegisterFunction(void ** fatCubinHandle, const char * hostFun, char *
     IOX_RECV_RETURN_STATUS(cudaError_t);
 
     TallyClient::client->_kernel_addr_to_args[hostFun] = TallyClient::client->_kernel_name_to_args[deviceFunName];
+    
+    if (!l__cudaRegisterFunction) {
+    	l__cudaRegisterFunction =
+            (void (*)(void **, const char *, char *, const char *, int, uint3 *, uint3 *, dim3 *, dim3 *, int *))
+            dlsym(RTLD_NEXT, "__cudaRegisterFunction");
+    	if (!l__cudaRegisterFunction) {
+            throw std::runtime_error("Failed to resolve __cudaRegisterFunction");
+    	}
+    }
     return l__cudaRegisterFunction(fatCubinHandle, hostFun, deviceFun, deviceName, thread_limit, tid, bid, bDim, gDim, wSize);
 #endif
 }
@@ -426,6 +444,13 @@ void __cudaRegisterFatBinaryEnd(void ** fatCubinHandle)
         })
         .or_else([](auto& error) { LOG_ERR_AND_EXIT("Could not allocate Request: ", error); });
 
+    if (!l__cudaRegisterFatBinaryEnd) {
+    	l__cudaRegisterFatBinaryEnd =
+            (void (*)(void **)) dlsym(RTLD_NEXT, "__cudaRegisterFatBinaryEnd");
+    	if (!l__cudaRegisterFatBinaryEnd) {
+            throw std::runtime_error("Failed to resolve __cudaRegisterFatBinaryEnd");
+    	}
+    }
     return l__cudaRegisterFatBinaryEnd(fatCubinHandle);
 #endif
 }
@@ -4075,7 +4100,8 @@ CUresult cuModuleLoadData(CUmodule * module, const void * image)
         fatbin_size = elf_size;
     }
 
-    auto &cubin_cache = TallyCache::cache->get_cubin_cache();
+    // auto &cubin_cache = TallyCache::cache->get_cubin_cache();
+    auto &cubin_cache = TallyCache::get_or_init_cache()->get_cubin_cache();
     bool cached = cubin_cache.contains(fatbin_data, fatbin_size);
     uint32_t cubin_uid = 0;
 
@@ -4417,10 +4443,12 @@ CUresult cuGetProcAddress_v11030(const char * symbol, void ** pfn, int  cudaVers
         // do nothing
     }
     else if (symbol_str == "cuGetProcAddress") {
-        *pfn = (void **) cuGetProcAddress_v11030;
+        // *pfn = (void **) cuGetProcAddress_v11030;
+	*pfn = reinterpret_cast<void *>(cuGetProcAddress_v11030);
     }
     else if (symbol_str == "cuGetProcAddress_v2") {
-        *pfn = (void **) cuGetProcAddress_v2;
+        // *pfn = (void **) cuGetProcAddress_v2;
+	*pfn = reinterpret_cast<void *>(cuGetProcAddress_v2);
     }
     else if (symbol_str == "cuGraphInstantiate") {
         *pfn = dlsym(RTLD_DEFAULT, "cuGraphInstantiateWithFlags");
@@ -4430,25 +4458,24 @@ CUresult cuGetProcAddress_v11030(const char * symbol, void ** pfn, int  cudaVers
     }
     else if (std::find(cuGetProcAddress_funcs.begin(), cuGetProcAddress_funcs.end(), symbol_str) != cuGetProcAddress_funcs.end()) {
         *pfn = dlsym(RTLD_DEFAULT, symbol_str.c_str());
-        assert(pfn);
+        assert(*pfn);
     }
     else if (std::find(cuGetProcAddress_v2funcs.begin(), cuGetProcAddress_v2funcs.end(), symbol_str) != cuGetProcAddress_v2funcs.end()) {
         auto symbol_v2_str = symbol_str + "_v2";
         *pfn = dlsym(RTLD_DEFAULT, symbol_v2_str.c_str());
-        assert(pfn);
+        assert(*pfn);
     }
     else if (std::find(cuGetProcAddress_v3funcs.begin(), cuGetProcAddress_v3funcs.end(), symbol_str) != cuGetProcAddress_v3funcs.end()) {
         auto symbol_v3_str = symbol_str + "_v3";
         *pfn = dlsym(RTLD_DEFAULT, symbol_v3_str.c_str());
-        assert(pfn);
+        assert(*pfn);
     }
     else if (std::find(cuGetProcAddress_direct_call_funcs.begin(), cuGetProcAddress_direct_call_funcs.end(), symbol_str) != cuGetProcAddress_direct_call_funcs.end()) {
         return lcuGetProcAddress_v2(symbol, pfn, cudaVersion, flags, NULL);
     }
     else {
-        throw std::runtime_error(std::string(__FILE__) + ":" + std::to_string(__LINE__) + ": Unimplemented cuGetProcAddress_v2 lookup.");
+        return lcuGetProcAddress_v2(symbol, pfn, cudaVersion, flags, NULL);
     }
-
 	return res;
 }
 
@@ -4469,30 +4496,33 @@ CUresult cuGetProcAddress_v2(const char * symbol, void ** pfn, int  cudaVersion,
         // do nothing
     }
     else if (symbol_str == "cuGetProcAddress") {
-        *pfn = (void **) cuGetProcAddress_v11030;
+        // *pfn = (void **) cuGetProcAddress_v11030;
+	*pfn = reinterpret_cast<void *>(cuGetProcAddress_v11030);
     }
     else if (symbol_str == "cuGetProcAddress_v2") {
-        *pfn = (void **) cuGetProcAddress_v2;
+        // *pfn = (void **) cuGetProcAddress_v2;
+	*pfn = reinterpret_cast<void *>(cuGetProcAddress_v2);
     }
     else if (std::find(cuGetProcAddress_funcs.begin(), cuGetProcAddress_funcs.end(), symbol_str) != cuGetProcAddress_funcs.end()) {
         *pfn = dlsym(RTLD_DEFAULT, symbol_str.c_str());
-        assert(pfn);
+        assert(*pfn);
     }
     else if (std::find(cuGetProcAddress_v2funcs.begin(), cuGetProcAddress_v2funcs.end(), symbol_str) != cuGetProcAddress_v2funcs.end()) {
         auto symbol_v2_str = symbol_str + "_v2";
         *pfn = dlsym(RTLD_DEFAULT, symbol_v2_str.c_str());
-        assert(pfn);
+        assert(*pfn);
     }
     else if (std::find(cuGetProcAddress_v3funcs.begin(), cuGetProcAddress_v3funcs.end(), symbol_str) != cuGetProcAddress_v3funcs.end()) {
         auto symbol_v3_str = symbol_str + "_v3";
         *pfn = dlsym(RTLD_DEFAULT, symbol_v3_str.c_str());
-        assert(pfn);
+        assert(*pfn);
     }
     else if (std::find(cuGetProcAddress_direct_call_funcs.begin(), cuGetProcAddress_direct_call_funcs.end(), symbol_str) != cuGetProcAddress_direct_call_funcs.end()) {
         // do nothing
     }
     else {
-        throw std::runtime_error(std::string(__FILE__) + ":" + std::to_string(__LINE__) + ": Unimplemented cuGetProcAddress_v2 lookup: " + symbol_str);
+	return lcuGetProcAddress_v2(symbol, pfn, cudaVersion, flags, symbolStatus);
+        //throw std::runtime_error(std::string(__FILE__) + ":" + std::to_string(__LINE__) + ": Unimplemented cuGetProcAddress_v2 lookup: " + symbol_str);
     }
 
 	return res;
@@ -5840,7 +5870,8 @@ CUresult cuModuleLoadFatBinary(CUmodule * module, const void * fatCubin)
 
     CUresult err;
 
-    auto &cubin_cache = TallyCache::cache->get_cubin_cache();
+    // auto &cubin_cache = TallyCache::cache->get_cubin_cache();
+    auto &cubin_cache = TallyCache::get_or_init_cache()->get_cubin_cache();
     bool cached = cubin_cache.contains(fatbin_data, fatbin_size);
     uint32_t cubin_uid = 0;
 
@@ -6005,7 +6036,8 @@ CUresult cuModuleLoadDataEx(CUmodule * module, const void * image, unsigned int 
         fatbin_size = elf_size;
     }
 
-    auto &cubin_cache = TallyCache::cache->get_cubin_cache();
+    // auto &cubin_cache = TallyCache::cache->get_cubin_cache();
+    auto &cubin_cache = TallyCache::get_or_init_cache()->get_cubin_cache();
     bool cached = cubin_cache.contains(fatbin_data, fatbin_size);
     uint32_t cubin_uid = 0;
 
@@ -7710,13 +7742,14 @@ CUresult cuGraphInstantiateWithFlags(CUgraphExec * phGraphExec, CUgraph  hGraph,
 CUresult cuGetExportTable(const void ** ppExportTable, const CUuuid * pExportTableId)
 {
 	TALLY_SPD_LOG("cuGetExportTable hooked");
-#if defined(RUN_LOCALLY)
+/*#if defined(RUN_LOCALLY)
 	return lcuGetExportTable(ppExportTable, pExportTableId);
 #else
     TALLY_SPD_WARN("cuGetExportTable is a internal CUDA call. Must override from higher-level API.");
 	std::cout << boost::stacktrace::stacktrace() << std::endl;
 	throw std::runtime_error(std::string(__FILE__) + ":" + std::to_string(__LINE__) + ": Unimplemented.");
-#endif
+#endif*/
+	return lcuGetExportTable(ppExportTable, pExportTableId);
 }
 
 cudaError_t cudaStreamIsCapturing(cudaStream_t  stream, enum cudaStreamCaptureStatus * pCaptureStatus)

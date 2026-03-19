@@ -1,7 +1,7 @@
 #include <fstream>
 #include <sstream>
 #include <unistd.h>
-
+#include <atomic>
 #include <boost/regex.hpp>
 
 #include <tally/log.h>
@@ -11,9 +11,10 @@
 #include <tally/cuda_launch.h>
 #include <tally/generated/cuda_api.h>
 
+
 bool CUDA_SPECS_INITIALIZED = false;
 
-std::vector<std::string> CUDA_COMPUTE_CAPABILITIES = {"90", "86", "80"};
+std::vector<std::string> CUDA_COMPUTE_CAPABILITIES = {"90", "86", "80", "89"};
 std::string CUDA_COMPUTE_CAPABILITY;
 int CUDA_NUM_SM;
 int CUDA_MAX_NUM_THREADS_PER_SM;
@@ -97,9 +98,21 @@ CUDA_MODULE_TYPE get_cuda_module_type(const void * image)
 
 std::string get_fatbin_str_from_ptx_str(std::string &ptx_str)
 {
+    // Use unique temp files per invocation to avoid any stale file issues
+    static std::atomic<uint32_t> invocation_counter{0};
+    uint32_t invoc_id = invocation_counter.fetch_add(1);
+    std::string suffix = std::to_string(getpid()) + "_" + std::to_string(invoc_id);
 
-    write_str_to_file("/tmp/output.ptx", ptx_str);
+    std::string ptx_tmp_path = "/tmp/tally_transform_" + suffix + ".ptx";
+    std::string fatbin_tmp_path = "/tmp/tally_transform_" + suffix + ".fatbin";
+    
+    write_str_to_file(ptx_tmp_path, ptx_str);
 
+    // Save debug copy of transformed PTX (won't be deleted)
+    std::string debug_ptx_path = "/tmp/tally_debug_transform_" + suffix + ".ptx";
+    write_str_to_file(debug_ptx_path, ptx_str);
+    TALLY_SPD_LOG_ALWAYS("Saved transformed PTX for debugging: " + debug_ptx_path);
+    
     std::string compute_cap = std::string(CUDA_COMPUTE_CAPABILITY);
 
     if (containsSubstring(ptx_str, ".target sm_90a")) {
@@ -113,20 +126,28 @@ std::string get_fatbin_str_from_ptx_str(std::string &ptx_str)
     std::string virtual_arch = "-gencode arch=compute_" + compute_cap + ",code=compute_" + compute_cap;
     std::string real_arch = "-gencode arch=compute_" + compute_cap + ",code=sm_" + compute_cap;
 
-    std::string compile_cmd = "nvcc /tmp/output.ptx --fatbin " + virtual_arch + " " +
-                              real_arch + " -o /tmp/output.fatbin";
+    std::string compile_cmd = "nvcc " + ptx_tmp_path + " --fatbin " + virtual_arch + " " +
+                              real_arch + " -o " + fatbin_tmp_path + " 2>&1";
                             
     auto res = exec(compile_cmd);
 
     if (res.second != 0) {
-        throw std::runtime_error("Fail to compile PTX.");
+        TALLY_SPD_LOG_ALWAYS("nvcc compilation FAILED. Output: " + res.first);
+        TALLY_SPD_LOG_ALWAYS("Failed PTX saved at: " + debug_ptx_path);
+        throw std::runtime_error("Fail to compile PTX. See " + debug_ptx_path);
     }
+    TALLY_SPD_LOG_ALWAYS("nvcc compilation succeeded (invoc " + std::to_string(invoc_id) + ")");
 
-    std::ifstream ifs("/tmp/output.fatbin", std::ios::binary);
+    std::ifstream ifs(fatbin_tmp_path, std::ios::binary);
     auto fatbin_str = std::string(std::istreambuf_iterator<char>(ifs), std::istreambuf_iterator<char>());
+
+    TALLY_SPD_LOG_ALWAYS("Compiled fatbin size: " + std::to_string(fatbin_str.size()) + " bytes");
 
     // std::remove("/tmp/output.ptx");
     // std::remove("/tmp/output.fatbin");
+    // Clean up compile temps but keep debug PTX copies
+    std::remove(ptx_tmp_path.c_str());
+    std::remove(fatbin_tmp_path.c_str());
 
     return fatbin_str;
 }

@@ -14,7 +14,8 @@
 void TallyServer::load_measurements(uint32_t cubin_uid)
 {
     // Register single-kernel perf cache
-    auto &performance_cache = TallyCache::cache->get_performance_cache();
+    // auto &performance_cache = TallyCache::cache->get_performance_cache();
+    auto &performance_cache = TallyCache::get_or_init_cache()->get_performance_cache();
     auto &cached_single_kernel_perf_map = performance_cache.single_kernel_perf_map;;
 
     for (auto &pair : cached_single_kernel_perf_map) {
@@ -91,7 +92,8 @@ void TallyServer::set_single_kernel_perf(
         result.metrics
     );
 
-    auto &performance_cache = TallyCache::cache->get_performance_cache();
+    auto &performance_cache = TallyCache::get_or_init_cache()->get_performance_cache();
+    // auto &performance_cache = TallyCache::cache->get_performance_cache();
     performance_cache.set_single_kernel_perf(launch_key, launch_config, cache_res);
 }
 
@@ -127,7 +129,7 @@ void TallyServer::clear_single_kernel_chosen_configs()
 
 void TallyServer::save_performance_cache()
 {
-    TallyCache::cache->save_performance_cache();
+    TallyCache::get_or_init_cache()->save_performance_cache();
 }
 
 // ======= Utility functions below =======

@@ -52,12 +52,16 @@ void TallyServer::start_main_server() {
             char channel_desc[100];
             strcpy(channel_desc, channel_desc_str.c_str()); 
 
-            worker_servers[client_id] = new iox::popo::UntypedServer({channel_desc, "tally", "tally"});
+	    if (worker_servers.find(client_id) == worker_servers.end()) {
+	    	worker_servers[client_id] = new iox::popo::UntypedServer({channel_desc, "tally", "tally"});
 
-            std::thread t(&TallyServer::start_worker_server, TallyServer::server, client_id);
-            worker_threads.push_back(std::move(t));
+            	std::thread t(&TallyServer::start_worker_server, TallyServer::server, client_id);
+            	worker_threads.push_back(std::move(t));
             
-            threads_running_map[client_id] = true;
+            	threads_running_map[client_id] = true;
+	    } else {
+		    TALLY_SPD_WARN("Duplicate handshake for client_id " + std::to_string(client_id) + ", reusing existing worker server.");
+	    }
 
             auto requestHeader = iox::popo::RequestHeader::fromPayload(requestPayload);
             handshake_server.loan(requestHeader, sizeof(HandshakeResponse), alignof(HandshakeResponse))
@@ -101,7 +105,7 @@ void TallyServer::start_main_server() {
         t.join();
     }
 
-    TallyCache::cache->save_transform_cache();
+    TallyCache::get_or_init_cache()->save_transform_cache();
 }
 
 int32_t TallyServer::get_client_priority(int32_t client_id)
@@ -149,7 +153,7 @@ void TallyServer::start_worker_server(int32_t client_id) {
     auto &client_meta = client_data_all[client_id];
 
     auto policy = SCHEDULER_POLICY;
-    if (policy == TALLY_SCHEDULER_POLICY::PRIORITY) {
+    if (policy == TALLY_SCHEDULER_POLICY::PRIORITY || policy == TALLY_SCHEDULER_POLICY::TGS) {
 
         int stream_priority = get_client_stream_priority(client_id);
         CHECK_CUDA_ERROR(cudaStreamCreateWithPriority(&client_meta.default_stream, cudaStreamNonBlocking, stream_priority));
@@ -166,7 +170,7 @@ void TallyServer::start_worker_server(int32_t client_id) {
     auto process_name = get_process_name(client_id);
     TALLY_SPD_LOG_ALWAYS("Client process: " + process_name);
 
-    if (policy == TALLY_SCHEDULER_POLICY::PRIORITY) {
+    if (policy == TALLY_SCHEDULER_POLICY::PRIORITY || policy == TALLY_SCHEDULER_POLICY::TGS) {
         int priority = get_client_priority(client_id);
         TALLY_SPD_LOG_ALWAYS("Client priority: " + std::to_string(priority));
     }
@@ -179,11 +183,16 @@ void TallyServer::start_worker_server(int32_t client_id) {
         worker_server->take().and_then([&](auto& requestPayload) {
 
             auto msg_header = static_cast<const MessageHeader_t*>(requestPayload);
-            auto handler = cuda_api_handler_map[msg_header->api_id];
+            // spdlog::info("Received api_id: {}", (int)msg_header->api_id);
+	    auto handler = cuda_api_handler_map[msg_header->api_id];
 
             void *args = (void *) (static_cast<const uint8_t*>(requestPayload) + sizeof(MessageHeader_t));
-            handler(args, worker_server, requestPayload);
-
+            try {
+	    	handler(args, worker_server, requestPayload);
+	    } catch(const std::runtime_error& e) {
+	    	spdlog::error("Unimplemented handler for api_id: {} - {}", (int)msg_header->api_id,
+  e.what());
+	    }
             worker_server->releaseRequest(requestPayload);
         });
 
@@ -228,6 +237,19 @@ void TallyServer::launch_and_measure_kernel(KernelLaunchWrapper &kernel_wrapper,
         auto start = std::chrono::high_resolution_clock::now();
         kernel_wrapper.kernel_to_dispatch(base_config, nullptr, nullptr, nullptr, false, 0, nullptr, nullptr, 0, true);
         cudaDeviceSynchronize();
+	// DEBUG: check for fault after base config dispatch
+        {
+            cudaError_t peek_err = cudaPeekAtLastError();
+            if (peek_err != cudaSuccess) {
+                  TALLY_SPD_LOG_ALWAYS("!!! BASE CONFIG FAULT: " +
+  std::string(cudaGetErrorString(peek_err)) +
+                                        " | kernel=" + kernel_name +
+                                        " | gridDim=(" + std::to_string(launch_call.gridDim.x) + ","
+   +
+                                        std::to_string(launch_call.gridDim.y) + "," +
+                                        std::to_string(launch_call.gridDim.z) + ")");
+            }
+        }
         auto end = std::chrono::high_resolution_clock::now();
 
         std::chrono::duration<double, std::milli> elapsed = end - start;
@@ -278,6 +300,17 @@ void TallyServer::launch_and_measure_kernel(KernelLaunchWrapper &kernel_wrapper,
         kernel_wrapper.kernel_to_dispatch(config, ptb_args, client_data.curr_idx_arr, &slice_args, false, 0, nullptr, nullptr, -1, true);
 
         cudaDeviceSynchronize();
+	// DEBUG: check for fault after variant dispatch
+        {
+            cudaError_t peek_err = cudaPeekAtLastError();
+            if (peek_err != cudaSuccess) {
+                  TALLY_SPD_LOG_ALWAYS("!!! VARIANT CONFIG FAULT: " +
+  std::string(cudaGetErrorString(peek_err)) +
+                                        " | kernel=" + kernel_name +
+                                        " | config=" + config.str());
+            }
+        }
+
         auto end = std::chrono::high_resolution_clock::now();
 
         std::chrono::duration<double, std::milli> elapsed = end - start;
@@ -589,7 +622,7 @@ const void *TallyServer::get_server_addr_from_cu_func(CUfunction cu_func)
 
 void TallyServer::register_kernel(const void *server_func_addr)
 {
-    auto &cubin_cache = TallyCache::cache->get_cubin_cache();
+    auto &cubin_cache = TallyCache::get_or_init_cache()->get_cubin_cache();
     auto cubin_uid = host_func_to_cubin_uid_map[server_func_addr];
     
     register_cu_module(cubin_uid);
@@ -602,7 +635,7 @@ void TallyServer::register_ptx_transform(uint32_t cubin_uid)
     using KERNEL_NAME_MAP_TYPE = folly::ConcurrentHashMap<std::string, const void *>;
     using KERNEL_MAP_TYPE = folly::ConcurrentHashMap<const void*, WrappedCUfunction>;
 
-    auto &cubin_cache = TallyCache::cache->get_cubin_cache();
+    auto &cubin_cache = TallyCache::get_or_init_cache()->get_cubin_cache();
     auto cubin_size = cubin_cache.get_cubin_size_from_cubin_uid(cubin_uid);
     auto cubin_data = cubin_cache.get_cubin_data_str_ptr_from_cubin_uid(cubin_uid);
     auto &kernel_params = cubin_cache.get_kernel_args(cubin_data, cubin_size);
@@ -733,15 +766,48 @@ void TallyServer::register_cu_module(uint32_t cubin_uid)
 {   
     if (cubin_to_cu_module.find(cubin_uid) == cubin_to_cu_module.end()) {
 
-        auto &cubin_cache = TallyCache::cache->get_cubin_cache();
+        auto &cubin_cache = TallyCache::get_or_init_cache()->get_cubin_cache();
         auto cubin_data = cubin_cache.get_cubin_data_str_ptr_from_cubin_uid(cubin_uid);
         auto cubin_size = cubin_cache.get_cubin_size_from_cubin_uid(cubin_uid);
         auto &transform_fatbin_str = cubin_cache.get_transform_fatbin_str(cubin_data, cubin_size);
         
+	// DEBUG: Check if CUDA context is healthy before module load
+        cudaError_t pre_check = cudaDeviceSynchronize();
+        TALLY_SPD_LOG_ALWAYS("Pre-load context check: " +
+  std::string(cudaGetErrorString(pre_check)) +
+                                " for cubin_uid " + std::to_string(cubin_uid));
+
         CUmodule transform_module;
-        CHECK_CUDA_ERROR(cuModuleLoadData(&transform_module, transform_fatbin_str.c_str()));
+	CUresult err = cuModuleLoadData(&transform_module, transform_fatbin_str.c_str());
+        //CHECK_CUDA_ERROR(cuModuleLoadData(&transform_module, transform_fatbin_str.c_str()));
+	
+	if (err != CUDA_SUCCESS) {
+            TALLY_SPD_LOG_ALWAYS("ERROR: cuModuleLoadData failed with error " +
+  std::to_string(err) +
+                                   " for cubin_uid " + std::to_string(cubin_uid) +
+                                   ", fatbin_str size = " +
+  std::to_string(transform_fatbin_str.size()));
+
+            // Fallback: try loading the original (untransformed) fatbin
+            TALLY_SPD_LOG_ALWAYS("Attempting fallback with original fatbin...");
+            auto cubin_data_str = cubin_cache.get_cubin_data_str_from_cubin_uid(cubin_uid);
+            err = cuModuleLoadData(&transform_module, cubin_data_str.c_str());
+            if (err != CUDA_SUCCESS) {
+                TALLY_SPD_LOG_ALWAYS("ERROR: Fallback also failed with error " +
+  std::to_string(err));
+                return;  // Skip this module entirely rather than crash
+            }
+            TALLY_SPD_LOG_ALWAYS("Fallback with original fatbin succeeded");
+        }
 
         cubin_to_cu_module.insert(cubin_uid, transform_module);
+	
+	cudaError_t sync_err = cudaDeviceSynchronize();
+  	if (sync_err != cudaSuccess) {
+      	    TALLY_SPD_LOG_ALWAYS("WARNING: cudaDeviceSynchronize after module load returned error " +
+                            std::to_string(sync_err) + " for cubin_uid " +
+  std::to_string(cubin_uid));
+  	}
     }
 }
 
@@ -769,7 +835,7 @@ void TallyServer::handle___cudaRegisterFatBinary(void *__args, iox::popo::Untype
     size_t cubin_size = args->cubin_size;
 
     // load cubin cache
-    auto &cubin_cache = TallyCache::cache->get_cubin_cache();
+    auto &cubin_cache = TallyCache::get_or_init_cache()->get_cubin_cache();
     cubin_cache.load_cubin_cache(cubin_size);
 
     std::string tmp_elf_file = "";
@@ -842,7 +908,7 @@ void TallyServer::handle___cudaRegisterFatBinaryEnd(void *__args, iox::popo::Unt
     int32_t client_id = msg_header->client_id;
 
     auto &client_meta = client_data_all[client_id];
-    auto &cubin_cache = TallyCache::cache->get_cubin_cache();
+    auto &cubin_cache = TallyCache::get_or_init_cache()->get_cubin_cache();
     
     const char* fatbin_data;
     size_t fatbin_size;
@@ -3033,7 +3099,7 @@ void TallyServer::handle_cuModuleLoadData(void *__args, iox::popo::UntypedServer
     size_t msg_len = sizeof(cuModuleLoadDataResponse);
 
     // load cubin cache
-    auto &cubin_cache = TallyCache::cache->get_cubin_cache();
+    auto &cubin_cache = TallyCache::get_or_init_cache()->get_cubin_cache();
     cubin_cache.load_cubin_cache(cubin_size);
     
     if (!cached) {
@@ -3049,7 +3115,7 @@ void TallyServer::handle_cuModuleLoadData(void *__args, iox::popo::UntypedServer
         .and_then([&](auto& responsePayload) {
             auto response = static_cast<cuModuleLoadDataResponse*>(responsePayload);
 
-            auto &cubin_cache = TallyCache::cache->get_cubin_cache();
+            auto &cubin_cache = TallyCache::get_or_init_cache()->get_cubin_cache();
             if (!cached) {
                 memcpy(response->tmp_elf_file, tmp_elf_file.c_str(), tmp_elf_file.size());
                 response->tmp_elf_file[tmp_elf_file.size()] = '\0';
@@ -3107,7 +3173,7 @@ void TallyServer::handle_cuModuleGetFunction(void *__args, iox::popo::UntypedSer
         auto cubin_size = std::get<1>(cubin_data_size_id);
         cubin_uid = std::get<2>(cubin_data_size_id);
 
-        auto &cubin_cache = TallyCache::cache->get_cubin_cache();
+        auto &cubin_cache = TallyCache::get_or_init_cache()->get_cubin_cache();
         auto kernel_names_and_param_sizes = cubin_cache.get_kernel_args(cubin_data, cubin_size);
         auto &param_sizes = kernel_names_and_param_sizes[kernel_name];
 
@@ -3491,7 +3557,7 @@ void TallyServer::handle_cudaStreamCreate(void *__args, iox::popo::UntypedServer
             auto response = static_cast<cudaStreamCreateResponse*>(responsePayload);
 
             auto policy = SCHEDULER_POLICY;
-            if (policy == TALLY_SCHEDULER_POLICY::PRIORITY) {
+            if (policy == TALLY_SCHEDULER_POLICY::PRIORITY || policy == TALLY_SCHEDULER_POLICY::TGS) {
 
                 int stream_priority = get_client_stream_priority(client_uid);
                 response->err = cudaStreamCreateWithPriority(
@@ -3531,7 +3597,7 @@ void TallyServer::handle_cudaStreamCreateWithFlags(void *__args, iox::popo::Unty
             auto response = static_cast<cudaStreamCreateWithFlagsResponse*>(responsePayload);
             
             auto policy = SCHEDULER_POLICY;
-            if (policy == TALLY_SCHEDULER_POLICY::PRIORITY) {
+            if (policy == TALLY_SCHEDULER_POLICY::PRIORITY || policy == TALLY_SCHEDULER_POLICY::TGS) {
 
                 int stream_priority = get_client_stream_priority(client_uid);
                 response->err = cudaStreamCreateWithPriority(
@@ -3570,7 +3636,7 @@ void TallyServer::handle_cudaStreamCreateWithPriority(void *__args, iox::popo::U
             auto response = static_cast<cudaStreamCreateWithPriorityResponse*>(responsePayload);
             
             auto policy = SCHEDULER_POLICY;
-            if (policy == TALLY_SCHEDULER_POLICY::PRIORITY) {
+            if (policy == TALLY_SCHEDULER_POLICY::PRIORITY || policy == TALLY_SCHEDULER_POLICY::TGS) {
 
                 int stream_priority = get_client_stream_priority(client_uid);
                 response->err = cudaStreamCreateWithPriority(
@@ -3645,7 +3711,7 @@ void TallyServer::handle_cuStreamCreateWithPriority(void *__args, iox::popo::Unt
             auto response = static_cast<cuStreamCreateWithPriorityResponse*>(responsePayload);
 
             auto policy = SCHEDULER_POLICY;
-            if (policy == TALLY_SCHEDULER_POLICY::PRIORITY) {
+            if (policy == TALLY_SCHEDULER_POLICY::PRIORITY || policy == TALLY_SCHEDULER_POLICY::TGS) {
 
                 int stream_priority = get_client_stream_priority(client_uid);
                 response->err = cuStreamCreateWithPriority(
@@ -3844,7 +3910,7 @@ void TallyServer::handle_cuStreamCreate(void *__args, iox::popo::UntypedServer *
             auto response = static_cast<cuStreamCreateResponse*>(responsePayload);
 
             auto policy = SCHEDULER_POLICY;
-            if (policy == TALLY_SCHEDULER_POLICY::PRIORITY) {
+            if (policy == TALLY_SCHEDULER_POLICY::PRIORITY || policy == TALLY_SCHEDULER_POLICY::TGS) {
 
                 int stream_priority = get_client_stream_priority(client_uid);
                 response->err = cuStreamCreateWithPriority(
@@ -4097,7 +4163,7 @@ void TallyServer::handle_cuModuleLoadFatBinary(void *__args, iox::popo::UntypedS
     const char *cubin_data;
 
     // load cubin cache
-    auto &cubin_cache = TallyCache::cache->get_cubin_cache();
+    auto &cubin_cache = TallyCache::get_or_init_cache()->get_cubin_cache();
     cubin_cache.load_cubin_cache(cubin_size);
     
     if (!cached) {
@@ -4114,7 +4180,7 @@ void TallyServer::handle_cuModuleLoadFatBinary(void *__args, iox::popo::UntypedS
         .and_then([&](auto& responsePayload) {
             auto response = static_cast<cuModuleLoadFatBinaryResponse*>(responsePayload);
 
-            auto &cubin_cache = TallyCache::cache->get_cubin_cache();
+            auto &cubin_cache = TallyCache::get_or_init_cache()->get_cubin_cache();
             if (!cached) {
                 memcpy(response->tmp_elf_file, tmp_elf_file.c_str(), tmp_elf_file.size());
                 response->tmp_elf_file[tmp_elf_file.size()] = '\0';
@@ -4162,7 +4228,7 @@ void TallyServer::handle_cuModuleLoadDataEx(void *__args, iox::popo::UntypedServ
     const char *cubin_data;
 
     // load cubin cache
-    auto &cubin_cache = TallyCache::cache->get_cubin_cache();
+    auto &cubin_cache = TallyCache::get_or_init_cache()->get_cubin_cache();
     cubin_cache.load_cubin_cache(cubin_size);
 
     if (!cached) {
@@ -4178,7 +4244,7 @@ void TallyServer::handle_cuModuleLoadDataEx(void *__args, iox::popo::UntypedServ
         .and_then([&](auto& responsePayload) {
             auto response = static_cast<cuModuleLoadDataExResponse*>(responsePayload);
 
-            auto &cubin_cache = TallyCache::cache->get_cubin_cache();
+            auto &cubin_cache = TallyCache::get_or_init_cache()->get_cubin_cache();
             if (!cached) {
                 memcpy(response->tmp_elf_file, tmp_elf_file.c_str(), tmp_elf_file.size());
                 response->tmp_elf_file[tmp_elf_file.size()] = '\0';

@@ -114,6 +114,15 @@ void TallyServer::priority_launch_and_measure_kernel(KernelLaunchWrapper &kernel
     auto launch_kernel_with_config = [&](CudaLaunchConfig &config) {
         // prepare ptb args
         auto ptb_args = client_data.stream_to_ptb_args[kernel_wrapper.launch_stream];
+	
+	// DEBUG: log BEFORE launch
+        /*TALLY_SPD_LOG_ALWAYS(">>> LAUNCHING kernel=" + kernel_name +
+                                " | use_original=" + std::to_string(config.use_original) +
+                                " | use_ptb=" + std::to_string(config.use_ptb) +
+                                " | use_dynamic_ptb=" + std::to_string(config.use_dynamic_ptb) +
+                                " | use_sliced=" + std::to_string(config.use_sliced) +
+                                " | use_preemptive_ptb=" +
+  std::to_string(config.use_preemptive_ptb));*/
 
         if (config.use_sliced) {
             
@@ -137,6 +146,37 @@ void TallyServer::priority_launch_and_measure_kernel(KernelLaunchWrapper &kernel
         }
 
         has_executed = true;
+
+	// DEBUG: sync and check for GPU faults after every kernel launch
+        /*cudaError_t sync_err = cudaDeviceSynchronize();
+        if (sync_err != cudaSuccess) {
+            TALLY_SPD_LOG_ALWAYS("!!! KERNEL FAULT: " + std::string(cudaGetErrorString(sync_err))
+  +
+                                    " | kernel=" + kernel_name +
+                                    " | use_original=" + std::to_string(config.use_original) +
+                                    " | use_ptb=" + std::to_string(config.use_ptb) +
+                                    " | use_dynamic_ptb=" + std::to_string(config.use_dynamic_ptb) +
+                                    " | use_sliced=" + std::to_string(config.use_sliced) +
+                                    " | use_preemptive_ptb=" +
+  std::to_string(config.use_preemptive_ptb));
+        }*/
+	// DEBUG: triple-check for GPU faults
+          cudaError_t peek_err = cudaPeekAtLastError();
+          cudaError_t get_err = cudaGetLastError();
+          cudaError_t sync_err = cudaDeviceSynchronize();
+          if (peek_err != cudaSuccess || get_err != cudaSuccess || sync_err != cudaSuccess) {
+              TALLY_SPD_LOG_ALWAYS("!!! KERNEL FAULT: peek=" +
+  std::string(cudaGetErrorString(peek_err)) +
+                                    " get=" + std::string(cudaGetErrorString(get_err)) +
+                                    " sync=" + std::string(cudaGetErrorString(sync_err)) +
+                                    " | kernel=" + kernel_name +
+                                    " | use_original=" + std::to_string(config.use_original) +
+                                    " | use_ptb=" + std::to_string(config.use_ptb) +
+                                    " | use_dynamic_ptb=" + std::to_string(config.use_dynamic_ptb) +
+                                    " | use_sliced=" + std::to_string(config.use_sliced) +
+                                    " | use_preemptive_ptb=" +
+  std::to_string(config.use_preemptive_ptb));
+          }
     };
 
     auto profile_config = [&](CudaLaunchConfig &config) {
@@ -962,9 +1002,9 @@ void TallyServer::run_priority_scheduler()
                     PTBKernelArgs *ptb_args = nullptr;
                     SlicedKernelArgs *sliced_args = nullptr;
 
-                    if (!is_highest_priority && kernel_wrapper.is_library_call) {
+                    /*if (!is_highest_priority && kernel_wrapper.is_library_call) {
                         TALLY_SPD_WARN("Found library call from low priority job");
-                    }
+                    }*/
 
                     auto &launch_call = kernel_wrapper.launch_call;
 
