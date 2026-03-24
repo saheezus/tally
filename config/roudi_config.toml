@@ -30,11 +30,15 @@ count = 30
 
 [[segment.mempool]]
 size = 4194304
-count = 10
+count = 30
+
+[[segment.mempool]]
+size = 134217728   # 128 MB
+count = 200
 
 [[segment.mempool]]
 size = 1073741824
-count = 2
+count = 10
 
 [[segment.mempool]]
 size = 3221225472
