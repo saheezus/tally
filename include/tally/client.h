@@ -39,7 +39,7 @@ public:
     std::unordered_map<const void *, std::vector<uint32_t>> _kernel_addr_to_args;
     std::unordered_map<CUfunction, std::vector<uint32_t>> _jit_kernel_addr_to_args;
 
-    iox::popo::UntypedClient *iox_client;
+    iox::popo::UntypedClient *iox_client = nullptr;
 
     TallyClient() :
         client_id(getpid())
@@ -57,6 +57,19 @@ public:
 
     void connect_to_server()
     {
+        // Fork safety: children inherit this singleton and may keep the parent's
+        // client_id/connection state, which can collide on the same IPC channel name.
+        auto curr_pid = static_cast<int32_t>(getpid());
+        if (client_id != curr_pid) {
+            client_id = curr_pid;
+            has_connected = false;
+
+            if (iox_client) {
+                delete iox_client;
+                iox_client = nullptr;
+            }
+        }
+
         if (!has_connected) {
             int32_t priority = std::getenv("PRIORITY") ? std::stoi(std::getenv("PRIORITY")) : 1;
 
