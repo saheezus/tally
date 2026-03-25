@@ -3,12 +3,12 @@
 shopt -s expand_aliases
 alias python3="python3.9"
 
-TALLY_CACHE_PATH=${HOME%%/}/.cache/tally/.tally_cache
-TALLY_CACHE_CLIENT_PATH=${HOME%%/}/.cache/tally/.tally_cache_client
+TALLY_CACHE_PATH=${PWD%%/}/.cache/tally/.tally_cache
+TALLY_CACHE_CLIENT_PATH=${PWD%%/}/.cache/tally/.tally_cache_client
 
 TALLY_CLIENT_LIB=libtally_client.so
 
-TALLY_CLIENT_LIB_PATH=${HOME%%/}/tally/build/$TALLY_CLIENT_LIB
+TALLY_CLIENT_LIB_PATH=${PWD%%/}/tally/build/$TALLY_CLIENT_LIB
 
 if [[ ! -z "$TALLY_HOME" ]]; then
     TALLY_CLIENT_LIB_PATH=${TALLY_HOME%%/}/build/$TALLY_CLIENT_LIB
