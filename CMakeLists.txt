@@ -75,6 +75,7 @@ set(TALLY_SERVER_SRC_FILES
     ${PROJECT_SOURCE_DIR}/src/tally/scheduler/profile.cpp
     ${PROJECT_SOURCE_DIR}/src/tally/scheduler/workload_agnostic.cpp
     ${PROJECT_SOURCE_DIR}/src/tally/scheduler/workload_aware.cpp
+    ${PROJECT_SOURCE_DIR}/src/tally/scheduler/tgs.cpp
 )
 
 set(TALLY_CLIENT_SRC_FILES
@@ -156,6 +157,7 @@ foreach(tally_client_target IN LISTS tally_client_targets)
     )
 
     target_compile_definitions(${tally_client_target} PRIVATE IS_CLIENT="TRUE")
+    target_link_options(${tally_client_target} PRIVATE -Wl,--exclude-libs,ALL)
 endforeach()
 
 target_compile_definitions(tally_client_local PRIVATE RUN_LOCALLY="TRUE")
