@@ -216,11 +216,12 @@ CUresult cuCtxCreate_v3(CUcontext * pctx, CUexecAffinityParam * paramsArray, int
 {
 	TALLY_SPD_LOG("cuCtxCreate_v3 hooked");
 	IOX_CLIENT_ACQUIRE_LOCK;
-#if defined(RUN_LOCALLY)
+/*#if defined(RUN_LOCALLY)
 	return lcuCtxCreate_v3(pctx, paramsArray, numParams, flags, dev);
 #else
 	throw std::runtime_error(std::string(__FILE__) + ":" + std::to_string(__LINE__) + ": Unimplemented.");
-#endif
+#endif*/
+	return lcuCtxCreate_v3(pctx, paramsArray, numParams, flags, dev);
 }
 
 CUresult cuCtxDestroy_v2(CUcontext  ctx)
@@ -721,11 +722,12 @@ CUresult cuCtxSetFlags(unsigned int  flags)
 {
 	TALLY_SPD_LOG("cuCtxSetFlags hooked");
 	IOX_CLIENT_ACQUIRE_LOCK;
-#if defined(RUN_LOCALLY)
+/*#if defined(RUN_LOCALLY)
 	return lcuCtxSetFlags(flags);
 #else
 	throw std::runtime_error(std::string(__FILE__) + ":" + std::to_string(__LINE__) + ": Unimplemented.");
-#endif
+#endif*/
+	return lcuCtxSetFlags(flags);
 }
 
 CUresult cuCtxSetLimit(CUlimit  limit, size_t  value)
@@ -2087,11 +2089,12 @@ CUresult cuGetErrorString(CUresult  error, const char ** pStr)
 {
 	TALLY_SPD_LOG("cuGetErrorString hooked");
 	IOX_CLIENT_ACQUIRE_LOCK;
-#if defined(RUN_LOCALLY)
+/*#if defined(RUN_LOCALLY)
 	return lcuGetErrorString(error, pStr);
 #else
 	throw std::runtime_error(std::string(__FILE__) + ":" + std::to_string(__LINE__) + ": Unimplemented.");
-#endif
+#endif*/
+	return lcuGetErrorString(error, pStr);
 }
 
 CUresult cuGraphAddBatchMemOpNode(CUgraphNode * phGraphNode, CUgraph  hGraph, const CUgraphNode * dependencies, size_t  numDependencies, const CUDA_BATCH_MEM_OP_NODE_PARAMS * nodeParams)
@@ -3087,11 +3090,15 @@ CUresult cuInit(unsigned int  Flags)
 {
 	TALLY_SPD_LOG("cuInit hooked");
 	IOX_CLIENT_ACQUIRE_LOCK;
-#if defined(RUN_LOCALLY)
+/*#if defined(RUN_LOCALLY)
 	return lcuInit(Flags);
 #else
+	if (lcuInit) {                                                                             
+ 	    lcuInit(Flags);                                                                        
+	}
 	return (CUresult) 0;
-#endif
+#endif*/
+	return lcuInit(Flags);
 }
 
 CUresult cuIpcCloseMemHandle(CUdeviceptr  dptr)
@@ -3603,11 +3610,16 @@ CUresult cuMemGetAllocationGranularity(size_t * granularity, const CUmemAllocati
 {
 	TALLY_SPD_LOG("cuMemGetAllocationGranularity hooked");
 	IOX_CLIENT_ACQUIRE_LOCK;
-#if defined(RUN_LOCALLY)
+/*#if defined(RUN_LOCALLY)
 	return lcuMemGetAllocationGranularity(granularity, prop, option);
 #else
 	throw std::runtime_error(std::string(__FILE__) + ":" + std::to_string(__LINE__) + ": Unimplemented.");
-#endif
+#endif*/
+	CUresult init_err = lcuInit(0);
+    	if (init_err != CUDA_SUCCESS) {
+        	return init_err;
+    	}
+	return lcuMemGetAllocationGranularity(granularity, prop, option);
 }
 
 CUresult cuMemGetAllocationPropertiesFromHandle(CUmemAllocationProp * prop, CUmemGenericAllocationHandle  handle)
